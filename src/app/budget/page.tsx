@@ -43,10 +43,6 @@ export default function BudgetPage() {
   const [savingsPercent, setSavingsPercent] = useState("");
   const [lineItems, setLineItems] = useState<LineItem[]>([]);
   const [activeRows, setActiveRows] = useState<Set<number>>(new Set());
-  const [computed, setComputed] = useState<Pick<
-    BudgetData,
-    "incomeAfterTax" | "essentialPercent" | "essentialAmount" | "savingsAmount" | "total"
-  > | null>(null);
 
   function applyBudget(budget: BudgetData) {
     setIncomeBeforeTax(String(budget.incomeBeforeTax));
@@ -64,14 +60,6 @@ export default function BudgetPage() {
         setTaxRatePercent(String(preset.rate));
       }
     }
-
-    setComputed({
-      incomeAfterTax: budget.incomeAfterTax,
-      essentialPercent: budget.essentialPercent,
-      essentialAmount: budget.essentialAmount,
-      savingsAmount: budget.savingsAmount,
-      total: budget.total,
-    });
   }
 
   useEffect(() => {
@@ -170,6 +158,18 @@ export default function BudgetPage() {
 
   const visibleLineItems = lineItems.filter((i) => i.name || activeRows.has(i.row));
 
+  // Computed live from the current form inputs, not the last-saved sheet
+  // values — so picking a country/rate updates these immediately, before
+  // you even hit Save.
+  const incomeNum = parseFloat(incomeBeforeTax) || 0;
+  const taxRateNum = parseFloat(taxRatePercent) || 0;
+  const savingsNum = parseFloat(savingsPercent) || 0;
+  const liveIncomeAfterTax = incomeNum * (1 - taxRateNum / 100);
+  const liveEssentialPercent = Math.max(0, 100 - savingsNum);
+  const liveSavingsAmount = liveIncomeAfterTax * (savingsNum / 100);
+  const liveEssentialAmount = liveIncomeAfterTax * (liveEssentialPercent / 100);
+  const liveTotal = lineItems.reduce((sum, i) => sum + (i.cost || 0), 0);
+
   return (
     <div className="min-h-dvh pb-28">
       <header className="flex items-center justify-between px-6 pt-8 pb-4">
@@ -259,24 +259,22 @@ export default function BudgetPage() {
               </div>
             </div>
 
-            {computed && (
-              <div className="grid grid-cols-2 gap-2">
-                <div className="rounded-2xl border border-card-border bg-card px-4 py-3 shadow-sm">
-                  <p className="text-xs text-muted">Income after tax</p>
-                  <p className="mt-0.5 text-base font-semibold">{currency(computed.incomeAfterTax)}</p>
-                </div>
-                <div className="rounded-2xl border border-card-border bg-card px-4 py-3 shadow-sm">
-                  <p className="text-xs text-muted">Savings Amount</p>
-                  <p className="mt-0.5 text-base font-semibold">{currency(computed.savingsAmount)}</p>
-                </div>
-                <div className="col-span-2 rounded-2xl border border-card-border bg-card px-4 py-3 shadow-sm">
-                  <p className="text-xs text-muted">
-                    Amount allowed to Spend after Savings ({computed.essentialPercent.toFixed(0)}%)
-                  </p>
-                  <p className="mt-0.5 text-base font-semibold">{currency(computed.essentialAmount)}</p>
-                </div>
+            <div className="grid grid-cols-2 gap-2">
+              <div className="rounded-2xl border border-card-border bg-card px-4 py-3 shadow-sm">
+                <p className="text-xs text-muted">Income after tax</p>
+                <p className="mt-0.5 text-base font-semibold">{currency(liveIncomeAfterTax)}</p>
               </div>
-            )}
+              <div className="rounded-2xl border border-card-border bg-card px-4 py-3 shadow-sm">
+                <p className="text-xs text-muted">Savings Amount</p>
+                <p className="mt-0.5 text-base font-semibold">{currency(liveSavingsAmount)}</p>
+              </div>
+              <div className="col-span-2 rounded-2xl border border-card-border bg-card px-4 py-3 shadow-sm">
+                <p className="text-xs text-muted">
+                  Amount allowed to Spend after Savings ({liveEssentialPercent.toFixed(0)}%)
+                </p>
+                <p className="mt-0.5 text-base font-semibold">{currency(liveEssentialAmount)}</p>
+              </div>
+            </div>
 
             <div>
               <div className="mb-2 flex items-center justify-between">
@@ -335,12 +333,10 @@ export default function BudgetPage() {
               )}
             </div>
 
-            {computed && (
-              <div className="flex items-center justify-between rounded-2xl border border-card-border bg-card px-4 py-3 shadow-sm">
-                <span className="text-sm text-muted">Total budgeted</span>
-                <span className="text-base font-semibold">{currency(computed.total)}</span>
-              </div>
-            )}
+            <div className="flex items-center justify-between rounded-2xl border border-card-border bg-card px-4 py-3 shadow-sm">
+              <span className="text-sm text-muted">Total budgeted</span>
+              <span className="text-base font-semibold">{currency(liveTotal)}</span>
+            </div>
 
             <button
               type="submit"

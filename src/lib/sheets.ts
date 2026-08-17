@@ -270,10 +270,7 @@ export interface BudgetLineItem {
 
 export interface BudgetData {
   incomeBeforeTax: number;
-  /** Derived by the sheet's own formula from incomeBeforeTax — not directly editable. */
   incomeAfterTax: number;
-  /** The rate currently baked into the income-after-tax formula, or null if it doesn't match that pattern yet (e.g. an old CPF-based formula). */
-  taxRatePercent: number | null;
   savingsPercent: number;
   essentialPercent: number;
   /** "Amount allowed to Spend after Savings" */
@@ -288,18 +285,11 @@ function toNumber(value: unknown): number {
   return Number.isNaN(n) ? 0 : n;
 }
 
-const TAX_FORMULA_PATTERN = /^=A2\*\(1-([\d.]+)\/100\)$/;
-
-/** e.g. 18.5 -> "=A2*(1-18.5/100)" */
-function incomeAfterTaxFormula(taxRatePercent: number): string {
-  return `=A2*(1-${taxRatePercent}/100)`;
-}
-
 /**
  * Reads the Income/Spending Breakdown block (columns A:F, top of the tab).
- * Everything except incomeBeforeTax, the tax rate baked into B2's formula,
- * savingsPercent, and each line item's name/cost is computed by the sheet's
- * own formulas — the app only ever writes those, never the derived fields.
+ * Everything except incomeBeforeTax, incomeAfterTax, savingsPercent, and
+ * each line item's name/cost is computed by the sheet's own formulas — the
+ * app only ever writes those, never the derived fields.
  */
 export async function getBudget(tabName: string): Promise<BudgetData> {
   const sheets = getSheetsClient();
@@ -307,15 +297,11 @@ export async function getBudget(tabName: string): Promise<BudgetData> {
   // Fetched unformatted so percentage/currency-formatted cells (e.g. "50%",
   // "$8,500.00") come back as plain numbers (0.5, 8500) instead of display
   // strings that would otherwise need re-scaling per cell's own formatting.
-  // B2 is fetched separately as a raw formula to recover the tax rate.
-  const [res, b2Res] = await Promise.all([
-    sheets.spreadsheets.values.get({ spreadsheetId: SHEET_ID, range, valueRenderOption: "UNFORMATTED_VALUE" }),
-    sheets.spreadsheets.values.get({
-      spreadsheetId: SHEET_ID,
-      range: `${quoteSheetName(tabName)}!B2`,
-      valueRenderOption: "FORMULA",
-    }),
-  ]);
+  const res = await sheets.spreadsheets.values.get({
+    spreadsheetId: SHEET_ID,
+    range,
+    valueRenderOption: "UNFORMATTED_VALUE",
+  });
   const rows = res.data.values ?? [];
 
   const lineItems: BudgetLineItem[] = [];
@@ -334,13 +320,9 @@ export async function getBudget(tabName: string): Promise<BudgetData> {
     lineItems.push({ row: i + 1, name: label, cost: toNumber(rows[i]?.[4]) });
   }
 
-  const b2Formula = String(b2Res.data.values?.[0]?.[0] ?? "");
-  const taxMatch = b2Formula.match(TAX_FORMULA_PATTERN);
-
   return {
     incomeBeforeTax: toNumber(rows[1]?.[0]),
     incomeAfterTax: toNumber(rows[1]?.[1]),
-    taxRatePercent: taxMatch ? Number(taxMatch[1]) : null,
     savingsPercent: toNumber(rows[4]?.[1]) * 100,
     essentialPercent: toNumber(rows[4]?.[0]) * 100,
     essentialAmount: toNumber(rows[7]?.[0]),
@@ -354,7 +336,7 @@ export async function updateBudget(
   tabName: string,
   input: {
     incomeBeforeTax: number;
-    taxRatePercent: number;
+    incomeAfterTax: number;
     savingsPercent: number;
     lineItems: { row: number; name: string; cost: number }[];
   }
@@ -363,7 +345,7 @@ export async function updateBudget(
   const sheetPrefix = quoteSheetName(tabName);
   const data = [
     { range: `${sheetPrefix}!A2`, values: [[input.incomeBeforeTax]] },
-    { range: `${sheetPrefix}!B2`, values: [[incomeAfterTaxFormula(input.taxRatePercent)]] },
+    { range: `${sheetPrefix}!B2`, values: [[input.incomeAfterTax]] },
     { range: `${sheetPrefix}!B5`, values: [[input.savingsPercent / 100]] },
     ...input.lineItems.map((item) => ({
       range: `${sheetPrefix}!D${item.row}:E${item.row}`,

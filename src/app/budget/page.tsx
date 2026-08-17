@@ -4,7 +4,6 @@ import { useEffect, useState } from "react";
 import BottomNav from "@/components/BottomNav";
 import ThemeToggle from "@/components/ThemeToggle";
 import { useToast } from "@/components/Toast";
-import { COUNTRY_TAX_RATES } from "@/lib/taxRates";
 
 interface LineItem {
   row: number;
@@ -15,7 +14,6 @@ interface LineItem {
 interface BudgetData {
   incomeBeforeTax: number;
   incomeAfterTax: number;
-  taxRatePercent: number | null;
   savingsPercent: number;
   essentialPercent: number;
   essentialAmount: number;
@@ -23,8 +21,6 @@ interface BudgetData {
   lineItems: LineItem[];
   total: number;
 }
-
-const TAX_COUNTRY_KEY = "financeTracker.taxCountry";
 
 function currency(n: number) {
   return `$${n.toFixed(2)}`;
@@ -38,28 +34,17 @@ export default function BudgetPage() {
   const [loadError, setLoadError] = useState<string | null>(null);
 
   const [incomeBeforeTax, setIncomeBeforeTax] = useState("");
-  const [country, setCountry] = useState("");
-  const [taxRatePercent, setTaxRatePercent] = useState("");
+  const [incomeAfterTax, setIncomeAfterTax] = useState("");
   const [savingsPercent, setSavingsPercent] = useState("");
   const [lineItems, setLineItems] = useState<LineItem[]>([]);
   const [activeRows, setActiveRows] = useState<Set<number>>(new Set());
 
   function applyBudget(budget: BudgetData) {
     setIncomeBeforeTax(String(budget.incomeBeforeTax));
+    setIncomeAfterTax(String(budget.incomeAfterTax));
     setSavingsPercent(String(Math.round(budget.savingsPercent * 100) / 100));
     setLineItems(budget.lineItems);
     setActiveRows(new Set(budget.lineItems.filter((i) => i.name).map((i) => i.row)));
-
-    if (budget.taxRatePercent !== null) {
-      setTaxRatePercent(String(budget.taxRatePercent));
-    } else {
-      const savedCountry = localStorage.getItem(TAX_COUNTRY_KEY);
-      const preset = COUNTRY_TAX_RATES.find((c) => c.name === savedCountry);
-      if (preset) {
-        setCountry(preset.name);
-        setTaxRatePercent(String(preset.rate));
-      }
-    }
   }
 
   useEffect(() => {
@@ -76,13 +61,6 @@ export default function BudgetPage() {
       .catch(() => setLoadError("Network error. Please try again."))
       .finally(() => setLoading(false));
   }, []);
-
-  function handleCountryChange(name: string) {
-    setCountry(name);
-    localStorage.setItem(TAX_COUNTRY_KEY, name);
-    const preset = COUNTRY_TAX_RATES.find((c) => c.name === name);
-    if (preset) setTaxRatePercent(String(preset.rate));
-  }
 
   const availableSlot = lineItems.find((i) => !i.name && !activeRows.has(i.row));
 
@@ -113,15 +91,15 @@ export default function BudgetPage() {
 
   async function handleSave(e: React.FormEvent) {
     e.preventDefault();
-    const income = parseFloat(incomeBeforeTax);
-    const taxRate = parseFloat(taxRatePercent);
+    const before = parseFloat(incomeBeforeTax);
+    const after = parseFloat(incomeAfterTax);
     const savings = parseFloat(savingsPercent);
-    if (!Number.isFinite(income) || income < 0) {
+    if (!Number.isFinite(before) || before < 0) {
       showToast("Enter a valid income amount.", "error");
       return;
     }
-    if (!Number.isFinite(taxRate) || taxRate < 0 || taxRate > 100) {
-      showToast("Tax rate must be between 0 and 100.", "error");
+    if (!Number.isFinite(after) || after < 0) {
+      showToast("Enter a valid income after tax amount.", "error");
       return;
     }
     if (!Number.isFinite(savings) || savings < 0 || savings > 100) {
@@ -135,8 +113,8 @@ export default function BudgetPage() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          incomeBeforeTax: income,
-          taxRatePercent: taxRate,
+          incomeBeforeTax: before,
+          incomeAfterTax: after,
           savingsPercent: savings,
           lineItems: lineItems.map((i) => ({ row: i.row, name: i.name, cost: i.cost })),
         }),
@@ -159,15 +137,13 @@ export default function BudgetPage() {
   const visibleLineItems = lineItems.filter((i) => i.name || activeRows.has(i.row));
 
   // Computed live from the current form inputs, not the last-saved sheet
-  // values — so picking a country/rate updates these immediately, before
-  // you even hit Save.
-  const incomeNum = parseFloat(incomeBeforeTax) || 0;
-  const taxRateNum = parseFloat(taxRatePercent) || 0;
+  // values — so editing any field updates these immediately, before you
+  // even hit Save.
+  const afterTaxNum = parseFloat(incomeAfterTax) || 0;
   const savingsNum = parseFloat(savingsPercent) || 0;
-  const liveIncomeAfterTax = incomeNum * (1 - taxRateNum / 100);
   const liveEssentialPercent = Math.max(0, 100 - savingsNum);
-  const liveSavingsAmount = liveIncomeAfterTax * (savingsNum / 100);
-  const liveEssentialAmount = liveIncomeAfterTax * (liveEssentialPercent / 100);
+  const liveSavingsAmount = afterTaxNum * (savingsNum / 100);
+  const liveEssentialAmount = afterTaxNum * (liveEssentialPercent / 100);
   const liveTotal = lineItems.reduce((sum, i) => sum + (i.cost || 0), 0);
 
   return (
@@ -188,59 +164,40 @@ export default function BudgetPage() {
           <form onSubmit={handleSave} className="space-y-6">
             {tabName && <p className="text-sm text-muted">Editing {tabName.trim()}</p>}
 
-            <div>
-              <label className="mb-2 block text-sm text-muted">Income (Before Tax)</label>
-              <div className="flex h-16 items-center rounded-2xl border border-card-border bg-card px-4 shadow-sm transition focus-within:border-accent">
-                <span className="mr-2 text-xl text-muted-2">$</span>
-                <input
-                  type="text"
-                  inputMode="decimal"
-                  value={incomeBeforeTax}
-                  onChange={(e) => {
-                    const v = e.target.value;
-                    if (/^\d*\.?\d{0,2}$/.test(v)) setIncomeBeforeTax(v);
-                  }}
-                  className="w-full bg-transparent text-xl font-semibold outline-none"
-                />
-              </div>
-            </div>
-
             <div className="grid grid-cols-2 gap-2">
               <div>
-                <label className="mb-2 block text-sm text-muted">Country</label>
-                <select
-                  value={country}
-                  onChange={(e) => handleCountryChange(e.target.value)}
-                  className="h-16 w-full rounded-2xl border border-card-border bg-card px-4 text-sm text-foreground shadow-sm outline-none transition focus:border-accent"
-                >
-                  <option value="">Select…</option>
-                  {COUNTRY_TAX_RATES.map((c) => (
-                    <option key={c.name} value={c.name}>
-                      {c.name}
-                    </option>
-                  ))}
-                </select>
-              </div>
-              <div>
-                <label className="mb-2 block text-sm text-muted">Tax rate</label>
+                <label className="mb-2 block text-sm text-muted">Income (Before Tax)</label>
                 <div className="flex h-16 items-center rounded-2xl border border-card-border bg-card px-4 shadow-sm transition focus-within:border-accent">
+                  <span className="mr-2 text-xl text-muted-2">$</span>
                   <input
                     type="text"
                     inputMode="decimal"
-                    value={taxRatePercent}
+                    value={incomeBeforeTax}
                     onChange={(e) => {
                       const v = e.target.value;
-                      if (/^\d*\.?\d{0,2}$/.test(v)) setTaxRatePercent(v);
+                      if (/^\d*\.?\d{0,2}$/.test(v)) setIncomeBeforeTax(v);
                     }}
                     className="w-full bg-transparent text-xl font-semibold outline-none"
                   />
-                  <span className="ml-2 text-xl text-muted-2">%</span>
+                </div>
+              </div>
+              <div>
+                <label className="mb-2 block text-sm text-muted">Income (After Tax)</label>
+                <div className="flex h-16 items-center rounded-2xl border border-card-border bg-card px-4 shadow-sm transition focus-within:border-accent">
+                  <span className="mr-2 text-xl text-muted-2">$</span>
+                  <input
+                    type="text"
+                    inputMode="decimal"
+                    value={incomeAfterTax}
+                    onChange={(e) => {
+                      const v = e.target.value;
+                      if (/^\d*\.?\d{0,2}$/.test(v)) setIncomeAfterTax(v);
+                    }}
+                    className="w-full bg-transparent text-xl font-semibold outline-none"
+                  />
                 </div>
               </div>
             </div>
-            <p className="-mt-4 text-xs text-muted-2">
-              Estimated effective rate for the selected country — edit it if you know your actual rate.
-            </p>
 
             <div>
               <label className="mb-2 block text-sm text-muted">% of Income saved</label>
@@ -261,12 +218,12 @@ export default function BudgetPage() {
 
             <div className="grid grid-cols-2 gap-2">
               <div className="rounded-2xl border border-card-border bg-card px-4 py-3 shadow-sm">
-                <p className="text-xs text-muted">Income after tax</p>
-                <p className="mt-0.5 text-base font-semibold">{currency(liveIncomeAfterTax)}</p>
-              </div>
-              <div className="rounded-2xl border border-card-border bg-card px-4 py-3 shadow-sm">
                 <p className="text-xs text-muted">Savings Amount</p>
                 <p className="mt-0.5 text-base font-semibold">{currency(liveSavingsAmount)}</p>
+              </div>
+              <div className="rounded-2xl border border-card-border bg-card px-4 py-3 shadow-sm">
+                <p className="text-xs text-muted">Total budgeted</p>
+                <p className="mt-0.5 text-base font-semibold">{currency(liveTotal)}</p>
               </div>
               <div className="col-span-2 rounded-2xl border border-card-border bg-card px-4 py-3 shadow-sm">
                 <p className="text-xs text-muted">
@@ -331,11 +288,6 @@ export default function BudgetPage() {
                   All 11 line item slots are in use — remove one to add a new one.
                 </p>
               )}
-            </div>
-
-            <div className="flex items-center justify-between rounded-2xl border border-card-border bg-card px-4 py-3 shadow-sm">
-              <span className="text-sm text-muted">Total budgeted</span>
-              <span className="text-base font-semibold">{currency(liveTotal)}</span>
             </div>
 
             <button

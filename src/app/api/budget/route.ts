@@ -18,9 +18,9 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Invalid request body." }, { status: 400 });
   }
 
-  const { incomeBeforeTax, taxRatePercent, savingsPercent, lineItems } = body as {
+  const { incomeBeforeTax, incomeAfterTax, savingsPercent, lineItems } = body as {
     incomeBeforeTax?: unknown;
-    taxRatePercent?: unknown;
+    incomeAfterTax?: unknown;
     savingsPercent?: unknown;
     lineItems?: unknown;
   };
@@ -28,13 +28,8 @@ export async function POST(req: NextRequest) {
   if (typeof incomeBeforeTax !== "number" || !Number.isFinite(incomeBeforeTax) || incomeBeforeTax < 0) {
     return NextResponse.json({ error: "Enter a valid income amount." }, { status: 400 });
   }
-  if (
-    typeof taxRatePercent !== "number" ||
-    !Number.isFinite(taxRatePercent) ||
-    taxRatePercent < 0 ||
-    taxRatePercent > 100
-  ) {
-    return NextResponse.json({ error: "Tax rate must be between 0 and 100." }, { status: 400 });
+  if (typeof incomeAfterTax !== "number" || !Number.isFinite(incomeAfterTax) || incomeAfterTax < 0) {
+    return NextResponse.json({ error: "Enter a valid income after tax amount." }, { status: 400 });
   }
   if (
     typeof savingsPercent !== "number" ||
@@ -61,7 +56,7 @@ export async function POST(req: NextRequest) {
 
   try {
     const tabName = await resolveTabForDate(todayISODate());
-    await updateBudget(tabName, { incomeBeforeTax, taxRatePercent, savingsPercent, lineItems });
+    await updateBudget(tabName, { incomeBeforeTax, incomeAfterTax, savingsPercent, lineItems });
     const budget = await getBudget(tabName);
     return NextResponse.json({ ok: true, tabName, budget });
   } catch (err) {

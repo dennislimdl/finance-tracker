@@ -18,14 +18,23 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Invalid request body." }, { status: 400 });
   }
 
-  const { incomeBeforeCPF, savingsPercent, categories } = body as {
-    incomeBeforeCPF?: unknown;
+  const { incomeBeforeTax, taxRatePercent, savingsPercent, lineItems } = body as {
+    incomeBeforeTax?: unknown;
+    taxRatePercent?: unknown;
     savingsPercent?: unknown;
-    categories?: unknown;
+    lineItems?: unknown;
   };
 
-  if (typeof incomeBeforeCPF !== "number" || !Number.isFinite(incomeBeforeCPF) || incomeBeforeCPF < 0) {
+  if (typeof incomeBeforeTax !== "number" || !Number.isFinite(incomeBeforeTax) || incomeBeforeTax < 0) {
     return NextResponse.json({ error: "Enter a valid income amount." }, { status: 400 });
+  }
+  if (
+    typeof taxRatePercent !== "number" ||
+    !Number.isFinite(taxRatePercent) ||
+    taxRatePercent < 0 ||
+    taxRatePercent > 100
+  ) {
+    return NextResponse.json({ error: "Tax rate must be between 0 and 100." }, { status: 400 });
   }
   if (
     typeof savingsPercent !== "number" ||
@@ -33,25 +42,26 @@ export async function POST(req: NextRequest) {
     savingsPercent < 0 ||
     savingsPercent > 100
   ) {
-    return NextResponse.json({ error: "Savings % must be between 0 and 100." }, { status: 400 });
+    return NextResponse.json({ error: "% of income saved must be between 0 and 100." }, { status: 400 });
   }
   if (
-    !Array.isArray(categories) ||
-    !categories.every(
-      (c) =>
-        c &&
-        typeof c.row === "number" &&
-        typeof c.cost === "number" &&
-        Number.isFinite(c.cost) &&
-        c.cost >= 0
+    !Array.isArray(lineItems) ||
+    !lineItems.every(
+      (item) =>
+        item &&
+        typeof item.row === "number" &&
+        typeof item.name === "string" &&
+        typeof item.cost === "number" &&
+        Number.isFinite(item.cost) &&
+        item.cost >= 0
     )
   ) {
-    return NextResponse.json({ error: "Invalid category costs." }, { status: 400 });
+    return NextResponse.json({ error: "Invalid line items." }, { status: 400 });
   }
 
   try {
     const tabName = await resolveTabForDate(todayISODate());
-    await updateBudget(tabName, { incomeBeforeCPF, savingsPercent, categories });
+    await updateBudget(tabName, { incomeBeforeTax, taxRatePercent, savingsPercent, lineItems });
     const budget = await getBudget(tabName);
     return NextResponse.json({ ok: true, tabName, budget });
   } catch (err) {

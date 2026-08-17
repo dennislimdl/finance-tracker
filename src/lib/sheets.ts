@@ -260,24 +260,27 @@ export async function recordExpense(
   return { mode: "added" };
 }
 
-export interface BudgetCategory {
-  /** Sheet row number, needed to write the cost back to the right cell. */
+export interface BudgetLineItem {
+  /** Sheet row number, needed to write the name/cost back to the right cells. */
   row: number;
+  /** Empty string means this slot is unused and available for a new line item. */
   name: string;
   cost: number;
 }
 
 export interface BudgetData {
-  incomeBeforeCPF: number;
-  /** Derived by the sheet's own formula from incomeBeforeCPF — not directly editable. */
-  incomeAfterCPF: number;
+  incomeBeforeTax: number;
+  /** Derived by the sheet's own formula from incomeBeforeTax — not directly editable. */
+  incomeAfterTax: number;
+  /** The rate currently baked into the income-after-tax formula, or null if it doesn't match that pattern yet (e.g. an old CPF-based formula). */
+  taxRatePercent: number | null;
   savingsPercent: number;
   essentialPercent: number;
+  /** "Amount allowed to Spend after Savings" */
   essentialAmount: number;
   savingsAmount: number;
-  categories: BudgetCategory[];
+  lineItems: BudgetLineItem[];
   total: number;
-  remaining: number;
 }
 
 function toNumber(value: unknown): number {
@@ -285,74 +288,86 @@ function toNumber(value: unknown): number {
   return Number.isNaN(n) ? 0 : n;
 }
 
+const TAX_FORMULA_PATTERN = /^=A2\*\(1-([\d.]+)\/100\)$/;
+
+/** e.g. 18.5 -> "=A2*(1-18.5/100)" */
+function incomeAfterTaxFormula(taxRatePercent: number): string {
+  return `=A2*(1-${taxRatePercent}/100)`;
+}
+
 /**
  * Reads the Income/Spending Breakdown block (columns A:F, top of the tab).
- * Everything except incomeBeforeCPF, savingsPercent, and each category's
- * cost is computed by the sheet's own formulas — the app only ever writes
- * those three, never the derived fields.
+ * Everything except incomeBeforeTax, the tax rate baked into B2's formula,
+ * savingsPercent, and each line item's name/cost is computed by the sheet's
+ * own formulas — the app only ever writes those, never the derived fields.
  */
 export async function getBudget(tabName: string): Promise<BudgetData> {
   const sheets = getSheetsClient();
+  const range = `${quoteSheetName(tabName)}!A1:F40`;
   // Fetched unformatted so percentage/currency-formatted cells (e.g. "50%",
   // "$8,500.00") come back as plain numbers (0.5, 8500) instead of display
   // strings that would otherwise need re-scaling per cell's own formatting.
-  const range = `${quoteSheetName(tabName)}!A1:F40`;
-  const res = await sheets.spreadsheets.values.get({
-    spreadsheetId: SHEET_ID,
-    range,
-    valueRenderOption: "UNFORMATTED_VALUE",
-  });
+  // B2 is fetched separately as a raw formula to recover the tax rate.
+  const [res, b2Res] = await Promise.all([
+    sheets.spreadsheets.values.get({ spreadsheetId: SHEET_ID, range, valueRenderOption: "UNFORMATTED_VALUE" }),
+    sheets.spreadsheets.values.get({
+      spreadsheetId: SHEET_ID,
+      range: `${quoteSheetName(tabName)}!B2`,
+      valueRenderOption: "FORMULA",
+    }),
+  ]);
   const rows = res.data.values ?? [];
 
-  const categories: BudgetCategory[] = [];
+  const lineItems: BudgetLineItem[] = [];
   let total = 0;
-  let remaining = 0;
-  // Category rows start at sheet row 3 (index 2); the list ends at the
-  // "Remaining" row — stop there so the separate Expenses table further
-  // down the same tab is never mistaken for more budget categories.
+  // Line item rows start at sheet row 3 (index 2) and run up to (not
+  // including) the "Total" row — stop there so the separate Expenses table
+  // further down the same tab is never mistaken for more line items.
   for (let i = 2; i < rows.length; i++) {
     const name = rows[i]?.[3];
-    if (typeof name !== "string" || !name.trim()) continue;
-    const label = name.trim();
+    const label = typeof name === "string" ? name.trim() : "";
     if (label === "Total") {
       total = toNumber(rows[i]?.[4]);
-    } else if (label === "Remaining") {
-      remaining = toNumber(rows[i]?.[4]);
       break;
-    } else {
-      categories.push({ row: i + 1, name: label, cost: toNumber(rows[i]?.[4]) });
     }
+    if (label === "Remaining") break;
+    lineItems.push({ row: i + 1, name: label, cost: toNumber(rows[i]?.[4]) });
   }
 
+  const b2Formula = String(b2Res.data.values?.[0]?.[0] ?? "");
+  const taxMatch = b2Formula.match(TAX_FORMULA_PATTERN);
+
   return {
-    incomeBeforeCPF: toNumber(rows[1]?.[0]),
-    incomeAfterCPF: toNumber(rows[1]?.[1]),
+    incomeBeforeTax: toNumber(rows[1]?.[0]),
+    incomeAfterTax: toNumber(rows[1]?.[1]),
+    taxRatePercent: taxMatch ? Number(taxMatch[1]) : null,
     savingsPercent: toNumber(rows[4]?.[1]) * 100,
     essentialPercent: toNumber(rows[4]?.[0]) * 100,
     essentialAmount: toNumber(rows[7]?.[0]),
     savingsAmount: toNumber(rows[7]?.[1]),
-    categories,
+    lineItems,
     total,
-    remaining,
   };
 }
 
 export async function updateBudget(
   tabName: string,
   input: {
-    incomeBeforeCPF: number;
+    incomeBeforeTax: number;
+    taxRatePercent: number;
     savingsPercent: number;
-    categories: { row: number; cost: number }[];
+    lineItems: { row: number; name: string; cost: number }[];
   }
 ): Promise<void> {
   const sheets = getSheetsClient();
   const sheetPrefix = quoteSheetName(tabName);
   const data = [
-    { range: `${sheetPrefix}!A2`, values: [[input.incomeBeforeCPF]] },
+    { range: `${sheetPrefix}!A2`, values: [[input.incomeBeforeTax]] },
+    { range: `${sheetPrefix}!B2`, values: [[incomeAfterTaxFormula(input.taxRatePercent)]] },
     { range: `${sheetPrefix}!B5`, values: [[input.savingsPercent / 100]] },
-    ...input.categories.map((c) => ({
-      range: `${sheetPrefix}!E${c.row}`,
-      values: [[c.cost]],
+    ...input.lineItems.map((item) => ({
+      range: `${sheetPrefix}!D${item.row}:E${item.row}`,
+      values: [[item.name, item.cost]],
     })),
   ];
   await sheets.spreadsheets.values.batchUpdate({

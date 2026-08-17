@@ -4,24 +4,27 @@ import { useEffect, useState } from "react";
 import BottomNav from "@/components/BottomNav";
 import ThemeToggle from "@/components/ThemeToggle";
 import { useToast } from "@/components/Toast";
+import { COUNTRY_TAX_RATES } from "@/lib/taxRates";
 
-interface BudgetCategory {
+interface LineItem {
   row: number;
   name: string;
   cost: number;
 }
 
 interface BudgetData {
-  incomeBeforeCPF: number;
-  incomeAfterCPF: number;
+  incomeBeforeTax: number;
+  incomeAfterTax: number;
+  taxRatePercent: number | null;
   savingsPercent: number;
   essentialPercent: number;
   essentialAmount: number;
   savingsAmount: number;
-  categories: BudgetCategory[];
+  lineItems: LineItem[];
   total: number;
-  remaining: number;
 }
+
+const TAX_COUNTRY_KEY = "financeTracker.taxCountry";
 
 function currency(n: number) {
   return `$${n.toFixed(2)}`;
@@ -34,25 +37,40 @@ export default function BudgetPage() {
   const [saving, setSaving] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
 
-  const [incomeBeforeCPF, setIncomeBeforeCPF] = useState("");
+  const [incomeBeforeTax, setIncomeBeforeTax] = useState("");
+  const [country, setCountry] = useState("");
+  const [taxRatePercent, setTaxRatePercent] = useState("");
   const [savingsPercent, setSavingsPercent] = useState("");
-  const [categories, setCategories] = useState<BudgetCategory[]>([]);
+  const [lineItems, setLineItems] = useState<LineItem[]>([]);
+  const [activeRows, setActiveRows] = useState<Set<number>>(new Set());
   const [computed, setComputed] = useState<Pick<
     BudgetData,
-    "incomeAfterCPF" | "essentialPercent" | "essentialAmount" | "savingsAmount" | "total" | "remaining"
+    "incomeAfterTax" | "essentialPercent" | "essentialAmount" | "savingsAmount" | "total"
   > | null>(null);
 
   function applyBudget(budget: BudgetData) {
-    setIncomeBeforeCPF(String(budget.incomeBeforeCPF));
+    setIncomeBeforeTax(String(budget.incomeBeforeTax));
     setSavingsPercent(String(Math.round(budget.savingsPercent * 100) / 100));
-    setCategories(budget.categories);
+    setLineItems(budget.lineItems);
+    setActiveRows(new Set(budget.lineItems.filter((i) => i.name).map((i) => i.row)));
+
+    if (budget.taxRatePercent !== null) {
+      setTaxRatePercent(String(budget.taxRatePercent));
+    } else {
+      const savedCountry = localStorage.getItem(TAX_COUNTRY_KEY);
+      const preset = COUNTRY_TAX_RATES.find((c) => c.name === savedCountry);
+      if (preset) {
+        setCountry(preset.name);
+        setTaxRatePercent(String(preset.rate));
+      }
+    }
+
     setComputed({
-      incomeAfterCPF: budget.incomeAfterCPF,
+      incomeAfterTax: budget.incomeAfterTax,
       essentialPercent: budget.essentialPercent,
       essentialAmount: budget.essentialAmount,
       savingsAmount: budget.savingsAmount,
       total: budget.total,
-      remaining: budget.remaining,
     });
   }
 
@@ -71,16 +89,55 @@ export default function BudgetPage() {
       .finally(() => setLoading(false));
   }, []);
 
+  function handleCountryChange(name: string) {
+    setCountry(name);
+    localStorage.setItem(TAX_COUNTRY_KEY, name);
+    const preset = COUNTRY_TAX_RATES.find((c) => c.name === name);
+    if (preset) setTaxRatePercent(String(preset.rate));
+  }
+
+  const availableSlot = lineItems.find((i) => !i.name && !activeRows.has(i.row));
+
+  function addLineItem() {
+    if (!availableSlot) return;
+    setActiveRows((prev) => new Set(prev).add(availableSlot.row));
+  }
+
+  function removeLineItem(row: number) {
+    setLineItems((prev) => prev.map((i) => (i.row === row ? { ...i, name: "", cost: 0 } : i)));
+    setActiveRows((prev) => {
+      const next = new Set(prev);
+      next.delete(row);
+      return next;
+    });
+  }
+
+  function updateLineItemName(row: number, name: string) {
+    setLineItems((prev) => prev.map((i) => (i.row === row ? { ...i, name } : i)));
+  }
+
+  function updateLineItemCost(row: number, value: string) {
+    const cost = parseFloat(value);
+    setLineItems((prev) =>
+      prev.map((i) => (i.row === row ? { ...i, cost: Number.isFinite(cost) ? cost : 0 } : i))
+    );
+  }
+
   async function handleSave(e: React.FormEvent) {
     e.preventDefault();
-    const income = parseFloat(incomeBeforeCPF);
+    const income = parseFloat(incomeBeforeTax);
+    const taxRate = parseFloat(taxRatePercent);
     const savings = parseFloat(savingsPercent);
     if (!Number.isFinite(income) || income < 0) {
       showToast("Enter a valid income amount.", "error");
       return;
     }
+    if (!Number.isFinite(taxRate) || taxRate < 0 || taxRate > 100) {
+      showToast("Tax rate must be between 0 and 100.", "error");
+      return;
+    }
     if (!Number.isFinite(savings) || savings < 0 || savings > 100) {
-      showToast("Savings % must be between 0 and 100.", "error");
+      showToast("% of income saved must be between 0 and 100.", "error");
       return;
     }
 
@@ -90,9 +147,10 @@ export default function BudgetPage() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          incomeBeforeCPF: income,
+          incomeBeforeTax: income,
+          taxRatePercent: taxRate,
           savingsPercent: savings,
-          categories: categories.map((c) => ({ row: c.row, cost: c.cost })),
+          lineItems: lineItems.map((i) => ({ row: i.row, name: i.name, cost: i.cost })),
         }),
       });
       const data = await res.json();
@@ -110,12 +168,7 @@ export default function BudgetPage() {
     }
   }
 
-  function updateCategoryCost(row: number, value: string) {
-    const cost = parseFloat(value);
-    setCategories((prev) =>
-      prev.map((c) => (c.row === row ? { ...c, cost: Number.isFinite(cost) ? cost : 0 } : c))
-    );
-  }
+  const visibleLineItems = lineItems.filter((i) => i.name || activeRows.has(i.row));
 
   return (
     <div className="min-h-dvh pb-28">
@@ -136,24 +189,61 @@ export default function BudgetPage() {
             {tabName && <p className="text-sm text-muted">Editing {tabName.trim()}</p>}
 
             <div>
-              <label className="mb-2 block text-sm text-muted">Income (Before CPF)</label>
+              <label className="mb-2 block text-sm text-muted">Income (Before Tax)</label>
               <div className="flex h-16 items-center rounded-2xl border border-card-border bg-card px-4 shadow-sm transition focus-within:border-accent">
                 <span className="mr-2 text-xl text-muted-2">$</span>
                 <input
                   type="text"
                   inputMode="decimal"
-                  value={incomeBeforeCPF}
+                  value={incomeBeforeTax}
                   onChange={(e) => {
                     const v = e.target.value;
-                    if (/^\d*\.?\d{0,2}$/.test(v)) setIncomeBeforeCPF(v);
+                    if (/^\d*\.?\d{0,2}$/.test(v)) setIncomeBeforeTax(v);
                   }}
                   className="w-full bg-transparent text-xl font-semibold outline-none"
                 />
               </div>
             </div>
 
+            <div className="grid grid-cols-2 gap-2">
+              <div>
+                <label className="mb-2 block text-sm text-muted">Country</label>
+                <select
+                  value={country}
+                  onChange={(e) => handleCountryChange(e.target.value)}
+                  className="h-16 w-full rounded-2xl border border-card-border bg-card px-4 text-sm text-foreground shadow-sm outline-none transition focus:border-accent"
+                >
+                  <option value="">Select…</option>
+                  {COUNTRY_TAX_RATES.map((c) => (
+                    <option key={c.name} value={c.name}>
+                      {c.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label className="mb-2 block text-sm text-muted">Tax rate</label>
+                <div className="flex h-16 items-center rounded-2xl border border-card-border bg-card px-4 shadow-sm transition focus-within:border-accent">
+                  <input
+                    type="text"
+                    inputMode="decimal"
+                    value={taxRatePercent}
+                    onChange={(e) => {
+                      const v = e.target.value;
+                      if (/^\d*\.?\d{0,2}$/.test(v)) setTaxRatePercent(v);
+                    }}
+                    className="w-full bg-transparent text-xl font-semibold outline-none"
+                  />
+                  <span className="ml-2 text-xl text-muted-2">%</span>
+                </div>
+              </div>
+            </div>
+            <p className="-mt-4 text-xs text-muted-2">
+              Estimated effective rate for the selected country — edit it if you know your actual rate.
+            </p>
+
             <div>
-              <label className="mb-2 block text-sm text-muted">Savings %</label>
+              <label className="mb-2 block text-sm text-muted">% of Income saved</label>
               <div className="flex h-16 items-center rounded-2xl border border-card-border bg-card px-4 shadow-sm transition focus-within:border-accent">
                 <input
                   type="text"
@@ -172,47 +262,77 @@ export default function BudgetPage() {
             {computed && (
               <div className="grid grid-cols-2 gap-2">
                 <div className="rounded-2xl border border-card-border bg-card px-4 py-3 shadow-sm">
-                  <p className="text-xs text-muted">Income after CPF</p>
-                  <p className="mt-0.5 text-base font-semibold">{currency(computed.incomeAfterCPF)}</p>
+                  <p className="text-xs text-muted">Income after tax</p>
+                  <p className="mt-0.5 text-base font-semibold">{currency(computed.incomeAfterTax)}</p>
                 </div>
                 <div className="rounded-2xl border border-card-border bg-card px-4 py-3 shadow-sm">
-                  <p className="text-xs text-muted">Essential ({computed.essentialPercent.toFixed(0)}%)</p>
-                  <p className="mt-0.5 text-base font-semibold">{currency(computed.essentialAmount)}</p>
-                </div>
-                <div className="rounded-2xl border border-card-border bg-card px-4 py-3 shadow-sm">
-                  <p className="text-xs text-muted">Savings</p>
+                  <p className="text-xs text-muted">Savings Amount</p>
                   <p className="mt-0.5 text-base font-semibold">{currency(computed.savingsAmount)}</p>
                 </div>
-                <div className="rounded-2xl border border-card-border bg-card px-4 py-3 shadow-sm">
-                  <p className="text-xs text-muted">Remaining</p>
-                  <p className="mt-0.5 text-base font-semibold">{currency(computed.remaining)}</p>
+                <div className="col-span-2 rounded-2xl border border-card-border bg-card px-4 py-3 shadow-sm">
+                  <p className="text-xs text-muted">
+                    Amount allowed to Spend after Savings ({computed.essentialPercent.toFixed(0)}%)
+                  </p>
+                  <p className="mt-0.5 text-base font-semibold">{currency(computed.essentialAmount)}</p>
                 </div>
               </div>
             )}
 
             <div>
-              <label className="mb-2 block text-sm text-muted">Category budgets</label>
+              <div className="mb-2 flex items-center justify-between">
+                <label className="text-sm text-muted">Regular monthly spending</label>
+                <button
+                  type="button"
+                  onClick={addLineItem}
+                  disabled={!availableSlot}
+                  className="text-sm font-medium text-accent transition disabled:opacity-40"
+                >
+                  + Add line item
+                </button>
+              </div>
               <div className="space-y-2">
-                {categories.map((c) => (
+                {visibleLineItems.map((item) => (
                   <div
-                    key={c.row}
-                    className="flex h-14 items-center gap-3 rounded-2xl border border-card-border bg-card px-4 shadow-sm transition focus-within:border-accent"
+                    key={item.row}
+                    className="flex h-14 items-center gap-2 rounded-2xl border border-card-border bg-card px-3 shadow-sm transition focus-within:border-accent"
                   >
-                    <span className="flex-1 truncate text-sm">{c.name}</span>
+                    <input
+                      type="text"
+                      value={item.name}
+                      placeholder="e.g. Netflix"
+                      onChange={(e) => updateLineItemName(item.row, e.target.value)}
+                      className="min-w-0 flex-1 bg-transparent text-sm outline-none placeholder:text-muted-2"
+                    />
                     <span className="text-muted-2">$</span>
                     <input
                       type="text"
                       inputMode="decimal"
-                      value={c.cost}
+                      value={item.cost}
                       onChange={(e) => {
                         const v = e.target.value;
-                        if (/^\d*\.?\d{0,2}$/.test(v)) updateCategoryCost(c.row, v);
+                        if (/^\d*\.?\d{0,2}$/.test(v)) updateLineItemCost(item.row, v);
                       }}
-                      className="w-20 bg-transparent text-right text-sm font-medium outline-none"
+                      className="w-16 bg-transparent text-right text-sm font-medium outline-none"
                     />
+                    <button
+                      type="button"
+                      onClick={() => removeLineItem(item.row)}
+                      aria-label="Remove line item"
+                      className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-muted transition active:scale-90"
+                    >
+                      ×
+                    </button>
                   </div>
                 ))}
+                {visibleLineItems.length === 0 && (
+                  <p className="text-sm text-muted-2">No line items yet — add one above.</p>
+                )}
               </div>
+              {!availableSlot && (
+                <p className="mt-2 text-xs text-muted-2">
+                  All 11 line item slots are in use — remove one to add a new one.
+                </p>
+              )}
             </div>
 
             {computed && (

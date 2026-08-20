@@ -183,6 +183,89 @@ export async function appendExpense(
 }
 
 /**
+ * For a backdated expense, finds where in the table it should be inserted so
+ * the table stays in date order: the sheet row right after the last existing
+ * row whose date is on or before targetDate. Scans the whole D:G column (not
+ * an offset range), so each array index lines up 1:1 with its sheet row
+ * number. Returns null if the table has no data rows at all (falls back to
+ * appending).
+ */
+async function findInsertionRow(
+  tabName: string,
+  targetDate: string
+): Promise<{ row: number; inheritFromBefore: boolean } | null> {
+  const sheets = getSheetsClient();
+  const range = `${quoteSheetName(tabName)}!${TABLE_COLUMNS}`;
+  const res = await sheets.spreadsheets.values.get({ spreadsheetId: SHEET_ID, range });
+  const rows = res.data.values ?? [];
+
+  let firstDataRow: number | null = null;
+  let lastRowAtOrBefore: number | null = null;
+  for (let i = 0; i < rows.length; i++) {
+    const date = parseSheetDate(rows[i]?.[0]);
+    if (!date) continue;
+    const sheetRow = i + 1;
+    if (firstDataRow === null) firstDataRow = sheetRow;
+    if (date <= targetDate) lastRowAtOrBefore = sheetRow;
+  }
+
+  if (lastRowAtOrBefore !== null) return { row: lastRowAtOrBefore + 1, inheritFromBefore: true };
+  if (firstDataRow !== null) return { row: firstDataRow, inheritFromBefore: false };
+  return null;
+}
+
+async function getSheetIdByName(tabName: string): Promise<number> {
+  const sheets = getSheetsClient();
+  const res = await sheets.spreadsheets.get({ spreadsheetId: SHEET_ID });
+  const sheet = (res.data.sheets ?? []).find((s) => s.properties?.title === tabName);
+  const sheetId = sheet?.properties?.sheetId;
+  if (sheetId === undefined || sheetId === null) {
+    throw new Error(`Sheet tab "${tabName}" not found.`);
+  }
+  return sheetId;
+}
+
+/**
+ * Inserts a real new row at sheetRow (shifting everything from that row down
+ * by one) and writes the expense into it — used for backdated entries so
+ * they land next to other rows with the same date instead of at the bottom
+ * of the table.
+ */
+async function insertExpenseAtRow(
+  tabName: string,
+  sheetRow: number,
+  inheritFromBefore: boolean,
+  expense: Expense
+): Promise<void> {
+  const sheets = getSheetsClient();
+  const sheetId = await getSheetIdByName(tabName);
+  await sheets.spreadsheets.batchUpdate({
+    spreadsheetId: SHEET_ID,
+    requestBody: {
+      requests: [
+        {
+          insertDimension: {
+            range: { sheetId, dimension: "ROWS", startIndex: sheetRow - 1, endIndex: sheetRow },
+            inheritFromBefore,
+          },
+        },
+      ],
+    },
+  });
+
+  const [startCol, endCol] = TABLE_COLUMNS.split(":");
+  const range = `${quoteSheetName(tabName)}!${startCol}${sheetRow}:${endCol}${sheetRow}`;
+  await sheets.spreadsheets.values.update({
+    spreadsheetId: SHEET_ID,
+    range,
+    valueInputOption: "USER_ENTERED",
+    requestBody: {
+      values: [[formatSheetDate(expense.date), expense.category, expense.amount, expense.remarks]],
+    },
+  });
+}
+
+/**
  * Finds the most recent row in the month's table matching the given category
  * + remarks (case-insensitive), for accumulate-in-place rules. Returns its
  * sheet row number and the cell's raw content — a formula string (e.g.
@@ -256,6 +339,15 @@ export async function recordExpense(
       return { mode: "accumulated" };
     }
   }
+
+  if (expense.date < todayISODate()) {
+    const insertion = await findInsertionRow(tabName, expense.date);
+    if (insertion) {
+      await insertExpenseAtRow(tabName, insertion.row, insertion.inheritFromBefore, expense);
+      return { mode: "added" };
+    }
+  }
+
   await appendExpense(tabName, expense);
   return { mode: "added" };
 }
